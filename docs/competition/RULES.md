@@ -22,7 +22,8 @@ That is different from reading ground-truth poses of the manikin, shirt, or chai
 1. Giving the policy cloth vertex/particle positions or velocities, exact shirt/manikin/chair positions, ground-truth segmentation,
    collision meshes, internal grasp anchors or success state, or the evaluator's geometric checks.
 2. Using that internal information to create target points, action labels, or automatic demonstrations, or to train and distill a teacher policy.
-3. Replaying robot or cloth state trajectories from the raw archive as if they were answers, or directly setting USD or simulator state.
+3. Replaying robot or cloth state trajectories from the raw archive as if they were answers, or directly setting USD or simulator state during evaluation.
+   How you reset or set up the simulator during training is up to you, but rules 1 and 2 still apply: no internal information as inputs, labels or teacher signals.
    The policy must receive allowed observations every 20 Hz step and output an action that follows the spec.
 4. Using audit files, evaluation JSON, the freely moved teleop viewport, episode spawn seeds,
    or dynamic camera world matrices that reveal object positions as training or inference inputs.
