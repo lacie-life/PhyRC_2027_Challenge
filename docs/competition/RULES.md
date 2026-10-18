@@ -12,7 +12,7 @@ These rules apply to generating training data, training, and inference.
 - Models and controllers that **estimate** object or garment positions and features from allowed observations.
 - Training on demonstrations of public observations and actions recorded by humans through teleop.
 - Publicly available pretrained models and training data from outside this environment (for example, another simulator), as long as none of it comes from this environment's internal information listed under "Not allowed". List them in your training records.
-- Using scores and success labels to select demonstrations and analyze results. These labels must not be used as policy inputs or to create action targets.
+- Using scores and success labels to select demonstrations and analyze results, and as training rewards (rule 3). These labels must not be used as policy inputs or to create action targets.
 
 The robot base's world pose counts as allowed localization in this track; using it is not a violation.
 That is different from reading ground-truth poses of the manikin, shirt, or chair, or overwriting recorded state to reproduce behavior.
@@ -23,7 +23,8 @@ That is different from reading ground-truth poses of the manikin, shirt, or chai
    collision meshes, internal grasp anchors or success state, or the evaluator's geometric checks.
 2. Using that internal information to create target points, action labels, or automatic demonstrations, or to train and distill a teacher policy.
 3. Replaying robot or cloth state trajectories from the raw archive as if they were answers, or directly setting USD or simulator state during evaluation.
-   How you reset or set up the simulator during training is up to you, but rules 1 and 2 still apply: no internal information as inputs, labels or teacher signals.
+   During training, how you reset or set up the simulator is up to you, and rewards, terminations and resets may be computed from internal state,
+   as long as no model receives internal state as an input. Rules 1 and 2 still apply: no internal information as inputs, action labels or teacher policies.
    The policy must receive allowed observations every 20 Hz step and output an action that follows the spec.
 4. Using audit files, evaluation JSON, the freely moved teleop viewport, episode spawn seeds,
    or dynamic camera world matrices that reveal object positions as training or inference inputs.
