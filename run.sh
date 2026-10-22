@@ -4,6 +4,10 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 IMAGE=${PHYRC_IMAGE:-phyrc-2027:isaac-6.0.1}
 COMMAND=${1:-help}
+if [[ "$COMMAND" == replay && "${2:-}" == --stream ]]; then
+    export STRETCH4_LIVESTREAM=1
+    set -- replay "${@:3}"
+fi
 if [[ "$COMMAND" == gui ]]; then
     shift
     while [[ $# -gt 0 ]]; do
@@ -24,6 +28,7 @@ if [[ "$COMMAND" == gui ]]; then
                 [[ "${2:-}" == 0 || "${2:-}" == 1 ]] || { printf -- '--full-record requires 0 or 1\n' >&2; exit 2; }
                 export STRETCH4_FULL_RECORD="$2"
                 shift 2;;
+            --stream) export STRETCH4_LIVESTREAM=1; shift;;
             --no-randomization) export STRETCH4_RANDOMIZE=0; shift;;
             *) printf 'Unknown gui option: %s\n' "$1" >&2; exit 2;;
         esac
@@ -39,11 +44,13 @@ if [[ "${2:-}" == --no-randomization ]]; then
     esac
 fi
 if [[ "$COMMAND" == help ]]; then
-    printf 'Usage: ./run.sh {doctor|build|prepare|gui|replay RECORDING [OPTIONS...]|smoke|python SCRIPT [ARGS...]|cpu SCRIPT [ARGS...]}\n'
+    printf 'Usage: ./run.sh {doctor|build|prepare|gui|replay [--stream] RECORDING [OPTIONS...]|smoke|python SCRIPT [ARGS...]|cpu SCRIPT [ARGS...]}\n'
     printf 'Use ./run.sh gui --no-randomization for fixed human and shirt placement.\n'
     printf 'Use ./run.sh gui --full-record 1 for a replay/evaluation state archive only (no training images or HDF5).\n'
     printf 'Use ./run.sh gui --training-record 1 for synchronized RGBD/action HDF5 plus full recording.\n'
     printf 'Use ./run.sh gui --evaluate 1 to score automatically from startup to ESC.\n'
+    printf 'Use ./run.sh gui --stream on a headless server (no monitor): view with the Isaac Sim WebRTC Streaming Client.\n'
+    printf '  Optional: ISAACSIM_HOST (default: GCP external IP, else first local IP), ISAACSIM_SIGNAL_PORT (49100/TCP), ISAACSIM_STREAM_PORT (47998/UDP).\n'
     printf 'Training capture defaults to deferred rendering: HDF5 is generated automatically after ESC.\n'
     exit 0
 fi
@@ -52,6 +59,7 @@ if [[ "$COMMAND" == doctor ]]; then
     docker info --format 'Docker {{.ServerVersion}}; runtimes={{json .Runtimes}}'
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
     printf 'DISPLAY=%s; session=%s\n' "${DISPLAY:-unset}" "${XDG_SESSION_TYPE:-unset}"
+    printf 'No DISPLAY (headless/cloud)? Use ./run.sh gui --stream.\n'
     printf 'Read README.md for hardware requirements and NVIDIA license acceptance.\n'
     exit 0
 fi
@@ -123,17 +131,46 @@ while IFS= read -r name; do
     esac
 done < <(compgen -e)
 if [[ "$COMMAND" == gui || "$COMMAND" == replay ]]; then
-    : "${DISPLAY:?A local graphical desktop with an attached monitor is required}"
-    command -v xauth >/dev/null
-    touch cache/xauth
-    chmod 600 cache/xauth
-    cookie=$(xauth -f "${XAUTHORITY:-$HOME/.Xauthority}" nlist "$DISPLAY")
-    [[ -n "$cookie" ]] || { printf 'No Xauthority cookie for DISPLAY=%s\n' "$DISPLAY" >&2; exit 2; }
-    printf '%s\n' "$cookie" | sed 's/^..../ffff/' | xauth -f cache/xauth nmerge -
-    chmod 644 cache/xauth
-    ARGS+=(-e STRETCH4_HEADLESS=0 -e DISPLAY -e XAUTHORITY=/tmp/.docker.xauth
-           -e "STRETCH4_SHOW_COLLIDER=${STRETCH4_SHOW_COLLIDER:-0}"
-           -v "$ROOT/cache/xauth:/tmp/.docker.xauth:ro" -v /tmp/.X11-unix:/tmp/.X11-unix:rw)
+    if [[ "${STRETCH4_LIVESTREAM:-0}" == 1 ]]; then
+        # Headless server (e.g. Google Cloud): no X11; Isaac Sim streams over WebRTC instead.
+        # ISAACSIM_HOST is the address the client connects to. Cloud VMs do not
+        # have their public IP on an interface, so ask the GCP metadata server
+        # first, then fall back to the first local IP (LAN). Set it explicitly
+        # for anything else, e.g. ISAACSIM_HOST=$(tailscale ip -4).
+        stream_host=${ISAACSIM_HOST:-}
+        if [[ -z "$stream_host" ]]; then
+            stream_host=$(curl -fsS -m 2 -H 'Metadata-Flavor: Google' \
+                http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null || true)
+        fi
+        if [[ -z "$stream_host" ]]; then
+            stream_host=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+        fi
+        [[ -n "$stream_host" ]] || { printf 'Set ISAACSIM_HOST to the IP the streaming client will connect to.\n' >&2; exit 2; }
+        signal_port=${ISAACSIM_SIGNAL_PORT:-49100}
+        stream_port=${ISAACSIM_STREAM_PORT:-47998}
+        # The livestream switch lives in sitecustomize; mount the repo copy so an
+        # image built before it existed still picks it up (no rebuild needed).
+        ARGS+=(-e STRETCH4_HEADLESS=1 -e STRETCH4_LIVESTREAM=1
+               -e "ISAACSIM_HOST=$stream_host"
+               -e "ISAACSIM_SIGNAL_PORT=$signal_port"
+               -e "ISAACSIM_STREAM_PORT=$stream_port"
+               -e "STRETCH4_SHOW_COLLIDER=${STRETCH4_SHOW_COLLIDER:-0}"
+               -v "$ROOT/sitecustomize/sitecustomize.py:/opt/isaac-compat/sitecustomize.py:ro")
+        printf 'Livestream: host %s, signaling %s/TCP, media %s/UDP.\n' "$stream_host" "$signal_port" "$stream_port" >&2
+        printf 'Allow %s/TCP and %s/UDP from your IP in the firewall, then connect the Isaac Sim WebRTC Streaming Client to %s once the scene is loaded.\n' "$signal_port" "$stream_port" "$stream_host" >&2
+    else
+        : "${DISPLAY:?No DISPLAY: a local desktop with a monitor is required. On a headless server (e.g. Google Cloud) use ./run.sh gui --stream}"
+        command -v xauth >/dev/null
+        touch cache/xauth
+        chmod 600 cache/xauth
+        cookie=$(xauth -f "${XAUTHORITY:-$HOME/.Xauthority}" nlist "$DISPLAY")
+        [[ -n "$cookie" ]] || { printf 'No Xauthority cookie for DISPLAY=%s\n' "$DISPLAY" >&2; exit 2; }
+        printf '%s\n' "$cookie" | sed 's/^..../ffff/' | xauth -f cache/xauth nmerge -
+        chmod 644 cache/xauth
+        ARGS+=(-e STRETCH4_HEADLESS=0 -e DISPLAY -e XAUTHORITY=/tmp/.docker.xauth
+               -e "STRETCH4_SHOW_COLLIDER=${STRETCH4_SHOW_COLLIDER:-0}"
+               -v "$ROOT/cache/xauth:/tmp/.docker.xauth:ro" -v /tmp/.X11-unix:/tmp/.X11-unix:rw)
+    fi
     if [[ "$COMMAND" == replay ]]; then
         shift
         [[ $# -gt 0 ]] || { printf 'replay requires a recording directory\n' >&2; exit 2; }
@@ -152,7 +189,7 @@ if [[ "$COMMAND" == gui || "$COMMAND" == replay ]]; then
         if docker "${ARGS[@]}" -e "STRETCH4_TRAINING_EXPORT_REQUEST=$training_request" "$IMAGE" Env_StandAlone/Teleop_TShirt_Stretch4_Env.py; then
             if [[ -f "$ROOT${training_request}" ]]; then
                 printf 'Teleop finished. Generating synchronized RGBD/HDF5 in a separate headless process...\n'
-                exec docker "${ARGS[@]}" "$IMAGE" /scripts/export_policy_dataset.py --request "$training_request"
+                exec docker "${ARGS[@]}" -e STRETCH4_LIVESTREAM=0 "$IMAGE" /scripts/export_policy_dataset.py --request "$training_request"
             fi
             printf 'No complete capture available for automatic export. Check the recording status.\n'
             exit 0
